@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Calling Numbers</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Calling Numbers</div>
+    <div id="whoami" class="muted"></div>
+  </header>
+
+  <!-- Dev-only sign in (production: your dashboard passes ?token=...) -->
+  <section id="login" class="card narrow hidden">
+    <h2>Sign in (dev mode)</h2>
+    <p class="muted">In production your dashboard opens this page with <code>?token=&lt;JWT&gt;</code>.</p>
+    <form id="loginForm" class="stack">
+      <label>Client ID <input name="client_id" required maxlength="64" placeholder="e.g. client_123"></label>
+      <label>Display name <input name="name" placeholder="Acme Pvt Ltd"></label>
+      <button class="primary">Continue</button>
+    </form>
+  </section>
+
+  <main id="app" class="hidden">
+    <div id="mockBanner" class="banner hidden">Mock mode: no real Plivo requests are made. KYC is auto-approved after ~5 seconds (an end-user name containing “reject” gets rejected).</div>
+    <nav class="tabs" role="tablist">
+      <button role="tab" data-tab="kyc" class="active">1. KYC verification</button>
+      <button role="tab" data-tab="buy">2. Buy numbers</button>
+      <button role="tab" data-tab="mine">3. My numbers</button>
+    </nav>
+
+    <!-- KYC -->
+    <section id="tab-kyc" class="tab">
+      <div class="card">
+        <div class="row between">
+          <h2>Your KYC applications</h2>
+          <button id="newKycBtn" class="primary">Start new KYC</button>
+        </div>
+        <p class="muted">Indian regulations require verified business KYC before numbers can be rented in your name. Only businesses registered in India are eligible. Review is automated and usually takes about 5 minutes.</p>
+        <div id="appsList"></div>
+      </div>
+
+      <div id="kycFormCard" class="card hidden">
+        <h2 id="kycFormTitle">New KYC application</h2>
+        <form id="kycForm" class="stack">
+          <div class="grid2" id="kycTypeRow">
+            <label>Number type
+              <select name="number_type" id="kycNumberType"></select>
+            </label>
+          </div>
+          <fieldset>
+            <legend>Business details</legend>
+            <div class="grid2" id="endUserFields"></div>
+          </fieldset>
+          <fieldset>
+            <legend>Registration documents</legend>
+            <p class="muted" style="margin-top:0" id="docIntro"></p>
+            <p class="muted">Download current copies from the MCA, Udyam or GST portal: they are checked against government records. The business name must be <b>exactly the same</b> on every document. Use a different file for each document. A business PAN alone is <b>not</b> accepted.</p>
+            <label id="docTypeWrap">Document you are uploading <select id="docTypeSelect"></select></label>
+            <div id="docFields"></div>
+            <label class="inline" style="margin-top:10px"><input type="checkbox" id="sealConfirm" required>
+              &nbsp;The document is signed by an authorised signatory and carries our company seal.</label>
+          </fieldset>
+          <div id="kycError" class="error hidden"></div>
+          <div class="row">
+            <button type="submit" class="primary" id="kycSubmit">Submit for verification</button>
+            <button type="button" id="kycCancel">Cancel</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <!-- Buy -->
+    <section id="tab-buy" class="tab hidden">
+      <div class="card">
+        <h2>Find a number</h2>
+        <div id="buyGate" class="notice hidden"></div>
+        <div id="usageNote" class="banner">Indian landline numbers (080, 022…) may be used for <b>service and transactional calls only</b>. TRAI rules prohibit promotional content on them: promotional calls need 140-series numbers. Calls also need the recipient's consent, otherwise they count as spam (UCC) and can get your KYC suspended.</div>
+        <form id="searchForm" class="row wrap">
+          <label>Type <select name="number_type" id="searchType"></select></label>
+          <label id="cityWrap">City <select name="city" id="citySelect"><option value="">Any city</option></select></label>
+          <label>Starts with <span class="hint">digits after +91, e.g. 80 = Bangalore, 22 = Mumbai</span><input name="pattern" inputmode="numeric" pattern="\d{1,10}" placeholder="e.g. 80"></label>
+          <button class="primary">Search</button>
+        </form>
+        <div id="searchError" class="error hidden"></div>
+        <div id="searchResults"></div>
+      </div>
+    </section>
+
+    <!-- Mine -->
+    <section id="tab-mine" class="tab hidden">
+      <div class="card">
+        <div class="row between">
+          <h2>My numbers</h2>
+          <label class="inline"><input type="checkbox" id="showReleased"> show released</label>
+        </div>
+        <p class="muted">These numbers are used as the caller ID for your AI calls.</p>
+        <div id="myNumbers"></div>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden" role="status"></div>
+  <script src="app.js"></script>
+</body>
+</html>
