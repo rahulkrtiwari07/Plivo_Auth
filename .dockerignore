@@ -1,0 +1,19 @@
+# Never bake secrets or data into the image: .env is passed at runtime by docker compose.
+.env
+.env.*
+!.env.example
+*.db
+*.db-journal
+
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+tests
+docs
+README.md
+Dockerfile
+docker-compose.yml
+.dockerignore

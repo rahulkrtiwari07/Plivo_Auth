@@ -69,7 +69,7 @@ class PhoneNumber(Base):
     monthly_rental_rate: Mapped[float] = mapped_column(Float, default=0.0)  # Plivo cost
     setup_rate: Mapped[float] = mapped_column(Float, default=0.0)  # Plivo cost
     # pending (buy in flight) | pending_activation (Plivo accepted, not yet active) | active | failed | released
-    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
     application_id: Mapped[int] = mapped_column(ForeignKey("compliance_applications.id"))
     failure_reason: Mapped[str | None] = mapped_column(Text)
     # Idempotency-Key sent by the integrating system on POST .../numbers (unique per client).

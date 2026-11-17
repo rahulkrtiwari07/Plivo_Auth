@@ -55,6 +55,26 @@ your AI dialer asks /internal/clients/{id}/caller-ids for the "from" number to u
   and commercial calls need the recipient's explicit consent. Otherwise they count as UCC: complaints need
   opt-in proof within 5 business days, and repeated violations lead to suspension, then TRAI blacklisting.
 
+## Run with Docker (recommended for servers)
+
+Runs the app plus PostgreSQL. Data is kept in the `pgdata` Docker volume.
+
+```powershell
+copy .env.example .env        # fill in Plivo credentials, keys and POSTGRES_PASSWORD
+docker compose up -d --build  # start (rebuild after code changes)
+docker compose ps             # app should show "healthy"
+docker compose logs -f app    # follow logs
+docker compose restart app    # after editing .env
+docker compose down           # stop (data kept)
+```
+
+- The app listens on `http://localhost:8000` (`APP_PORT` changes the port). It is published on localhost only,
+  so put a reverse proxy with HTTPS (nginx, Caddy, Traefik) in front for internet access and set `PUBLIC_BASE_URL`.
+- Inside compose the app always uses the Postgres container. `DATABASE_URL` in `.env` is ignored.
+- **`docker compose down -v` deletes the database** (all KYC records and numbers). Back up first:
+  `docker compose exec db pg_dump -U plivo plivo_numbers > backup.sql`.
+- Run one app container: the KYC poller and webhook sender run inside it.
+
 ## Run locally
 
 ```powershell

@@ -7,3 +7,4 @@ pydantic-settings>=2.3
 pyjwt>=2.8
 python-multipart>=0.0.9
 pytest>=8.0
+psycopg[binary]>=3.2

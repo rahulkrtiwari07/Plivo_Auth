@@ -1,0 +1,49 @@
+# Plivo Numbers service + PostgreSQL.
+#
+#   1. copy .env.example .env   and fill it in (Plivo credentials, keys, POSTGRES_PASSWORD)
+#   2. docker compose up -d --build
+#   3. open http://localhost:8000/healthz   (API reference: /docs)
+#
+# Data lives in the "pgdata" volume and survives restarts/rebuilds.
+# `docker compose down -v` DELETES it (all KYC records and numbers).
+
+services:
+  app:
+    build: .
+    image: plivo-numbers:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Overrides DATABASE_URL from .env: inside compose the app always uses the db container.
+      DATABASE_URL: postgresql+psycopg://plivo:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/plivo_numbers
+    ports:
+      # Published on localhost only. Put a reverse proxy with HTTPS in front for internet access
+      # (Plivo callbacks need PUBLIC_BASE_URL=https://...), or change to "${APP_PORT:-8000}:8000".
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: plivo_numbers
+      POSTGRES_USER: plivo
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Not published to the host. To inspect: docker compose exec db psql -U plivo plivo_numbers
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U plivo -d plivo_numbers"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:
