@@ -35,6 +35,15 @@ class Settings(BaseSettings):
     # As of Nov 2026 Plivo only has India landline stock in these two.
     number_cities: str = "Bangalore,Mumbai"
 
+    # ---- Integration API (/v1) for your own backend ----
+    # Header X-API-Key. Empty = the /v1 API is disabled.
+    integration_api_key: str = ""
+    # Where to POST event notifications (kyc.accepted, number.purchased, ...). Empty = no webhooks.
+    webhook_url: str = ""
+    # Shared secret used to sign webhook bodies (HMAC-SHA256). Required when webhook_url is set.
+    webhook_secret: str = ""
+    webhook_poll_seconds: int = 5
+
     @property
     def cities(self) -> list[str]:
         return [c.strip() for c in self.number_cities.split(",") if c.strip()]

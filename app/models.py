@@ -1,7 +1,7 @@
 """Local records that map Plivo resources (owned by OUR master account) to dashboard clients."""
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Index, Integer, String, Text, text
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -72,10 +72,47 @@ class PhoneNumber(Base):
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
     application_id: Mapped[int] = mapped_column(ForeignKey("compliance_applications.id"))
     failure_reason: Mapped[str | None] = mapped_column(Text)
+    # Idempotency-Key sent by the integrating system on POST .../numbers (unique per client).
+    idempotency_key: Mapped[str | None] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     application: Mapped[ComplianceApplication] = relationship(back_populates="numbers")
+
+
+class NumberOffer(Base):
+    """Numbers recently shown to a client in a search. A client can only buy a number it was offered,
+    and the price is taken from here, not from the caller. Stored in the DB (not memory) so search and
+    buy may hit different worker processes."""
+
+    __tablename__ = "number_offers"
+    __table_args__ = (UniqueConstraint("client_id", "number", name="uq_offer_client_number"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[str] = mapped_column(String(64), index=True)
+    number: Mapped[str] = mapped_column(String(32))
+    number_type: Mapped[str] = mapped_column(String(16))
+    data: Mapped[dict] = mapped_column(JSON, default=dict)  # Plivo search object
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class WebhookEvent(Base):
+    """Outbox of event notifications for the integrating system, delivered with retries."""
+
+    __tablename__ = "webhook_events"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)  # evt_...
+    type: Mapped[str] = mapped_column(String(64), index=True)
+    client_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    payload: Mapped[dict] = mapped_column(JSON)
+    # pending | delivered | failed (gave up after max attempts)
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class LedgerEntry(Base):

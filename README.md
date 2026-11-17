@@ -22,13 +22,14 @@ your AI dialer asks /internal/clients/{id}/caller-ids for the "from" number to u
   another client, only released and bought again.
 - **Businesses only.** Only India-registered businesses can rent Indian numbers.
 - **Documents (`KYC_DOCUMENTS_MODE`).** The form is built from Plivo's Requirements API.
-  - `all` (default) requires every listed document type. This follows the [Compliance API spec](https://www.plivo.com/docs/numbers/compliance):
-    for India that is a **Registration Certificate (COI or Udyam) and a GST Certificate**.
-  - `one` requires exactly one, matching the "any one of GST/COI/Udyam" wording of the India console guide.
-    The two Plivo pages disagree, so confirm with Plivo.
+  - Plivo's API has two slots, **Registration Certificate** and **GST certificate**, and **both must be sent**
+    (confirmed by Plivo support, Nov 2026). Keep `KYC_DOCUMENTS_MODE=all`; `one` is rejected by Plivo today.
+  - Accepted documents: GST Certificate, Certificate of Incorporation (COI) or Udyam Certificate. A business
+    with only one of them uploads **the same file in both slots**, via `"same_file_for_all": true` in the API
+    or the "I have only one document" checkbox in the form.
   - The business name must match exactly across `end_user.name` and every `business_name` field (filled in
-    automatically, and a mismatch is rejected). The same file can't be used for two documents. Files must be
-    PDF/JPEG/PNG, at most 5 MB, sealed and signed, and current copies from the government portal.
+    automatically, and a mismatch is rejected). Files must be PDF/JPEG/PNG, at most 5 MB, sealed and signed,
+    and current copies from the government portal.
   - A business PAN alone is rejected, and the registration number must be a valid GSTIN, CIN or Udyam number.
 - **Search & buy** ([Phone Numbers API](https://www.plivo.com/docs/numbers/phone-numbers)).
   - Search uses `type=local` and `services=voice`, with `city` for local numbers. `pattern` is a **prefix** after
@@ -70,6 +71,12 @@ rejected, so you can try the resubmit flow.
 API docs: http://localhost:8000/docs. Tests: `.venv\Scripts\python -m pytest`.
 
 ## Integrating with your dashboard
+
+**Recommended: the server-to-server Integration API (`/v1`).** Your backend calls it with
+`X-API-Key: <INTEGRATION_API_KEY>` and your own customer ids, and receives signed webhooks
+(`kyc.accepted`, `number.purchased`, …). See **[docs/INTEGRATION.md](docs/INTEGRATION.md)** and `/docs` → *Integration v1*.
+
+The options below are for embedding the bundled UI instead.
 
 1. **Auth.** Your dashboard backend signs a short-lived HS256 JWT with `JWT_SECRET`:
    ```python

@@ -95,8 +95,9 @@ def test_kyc_file_validation(client):
     assert r.status_code == 400 and "PDF, JPEG or PNG" in r.json()["detail"]
     r = submit(client, "v1", business_payload(), files={"file_mock-doc-registration": FILES["file_mock-doc-registration"]})
     assert r.status_code == 400 and "file upload" in r.json()["detail"]
+    # Plivo support: a business with a single document may upload the same file in both slots.
     r = submit(client, "v1", business_payload(), files={**FILES, "file_mock-doc-gst": ("gst.pdf", PDF, "application/pdf")})
-    assert r.status_code == 400 and "same file" in r.json()["detail"]
+    assert r.status_code == 201, r.text
 
 
 @pytest.mark.parametrize("reg", ["29ABCDE1234F1Z5", "udyam-ka-01-0000001"])

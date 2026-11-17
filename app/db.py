@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from app.config import get_settings
@@ -26,3 +26,15 @@ def init_db() -> None:
     from app import models  # noqa: F401  (register models)
 
     Base.metadata.create_all(engine)
+    _upgrade_existing_tables()
+
+
+def _upgrade_existing_tables() -> None:
+    """create_all() makes missing tables but never alters existing ones. Small additive upgrades
+    for databases created by earlier versions live here (safe to run on every start)."""
+    cols = {c["name"] for c in inspect(engine).get_columns("phone_numbers")}
+    with engine.begin() as conn:
+        if "idempotency_key" not in cols:
+            conn.execute(text("ALTER TABLE phone_numbers ADD COLUMN idempotency_key VARCHAR(128)"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_number_idempotency "
+                          "ON phone_numbers (client_id, idempotency_key)"))

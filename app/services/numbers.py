@@ -4,28 +4,30 @@ from __future__ import annotations
 import json
 import logging
 import re
-import threading
-import time
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth import CurrentClient
 from app.config import get_settings
-from app.models import ComplianceApplication, LedgerEntry, PhoneNumber
+from app.models import ComplianceApplication, LedgerEntry, NumberOffer, PhoneNumber
 from app.plivo_client import PlivoError, get_plivo
+from app.serializers import number_out
+from app.services import events
 from app.services.compliance import accepted_application
 
 log = logging.getLogger(__name__)
 
-# Search results are remembered per client so that (a) a client can only buy a number they were
-# actually offered and (b) we know its price without trusting the browser.
-_SEARCH_TTL = 15 * 60
-_offers: dict[str, dict[str, tuple[float, dict]]] = {}
-_offers_lock = threading.Lock()
+# Search results are remembered per client (number_offers table) so that (a) a client can only buy a
+# number it was actually offered and (b) we know its price without trusting the caller.
+_SEARCH_TTL = timedelta(minutes=15)
+
+
+def _aware(dt: datetime) -> datetime:
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
 
 # A number occupies a client's slot (and can't be bought by anyone else) while in one of these states.
 LIVE_STATUSES = ("pending", "pending_activation", "active")
@@ -79,38 +81,53 @@ def search(db: Session, client: CurrentClient, number_type: str, pattern: str | 
     except PlivoError as exc:
         raise HTTPException(exc.status_code, f"Number search failed: {exc.message}") from exc
 
-    now, results = time.time(), []
-    with _offers_lock:
-        mine = _offers.setdefault(client.client_id, {})
-        for k in [k for k, (ts, _) in mine.items() if now - ts > _SEARCH_TTL]:
-            del mine[k]
-        for obj in data.get("objects", []):
-            if obj.get("voice_enabled") is False:
-                continue
-            if obj.get("restriction"):
-                # city-address / country-address / terms-and-conditions need extra verification that this
-                # service doesn't collect; buying would leave the number pending, so don't offer it.
-                log.info("skipping %s: restriction=%s", obj.get("number"), obj.get("restriction"))
-                continue
-            mine[obj["number"]] = (now, {**obj, "_number_type": number_type})
-            results.append({
-                "number": obj["number"], "city": obj.get("city"), "region": obj.get("region"),
-                "type": obj.get("type") or number_type, "setup_price": _price(_f(obj.get("setup_rate"))),
-                "monthly_price": _price(_f(obj.get("monthly_rental_rate"))),
-                "voice_rate": _f(obj.get("voice_rate")), "sms_enabled": bool(obj.get("sms_enabled")),
-            })
+    now, results = datetime.now(timezone.utc), []
+    db.execute(delete(NumberOffer).where(NumberOffer.created_at < now - _SEARCH_TTL))
+    for obj in data.get("objects", []):
+        if obj.get("voice_enabled") is False:
+            continue
+        if obj.get("restriction"):
+            # city-address / country-address / terms-and-conditions need extra verification that this
+            # service doesn't collect; buying would leave the number pending, so don't offer it.
+            log.info("skipping %s: restriction=%s", obj.get("number"), obj.get("restriction"))
+            continue
+        db.execute(delete(NumberOffer).where(NumberOffer.client_id == client.client_id,
+                                             NumberOffer.number == obj["number"]))
+        db.add(NumberOffer(client_id=client.client_id, number=obj["number"], number_type=number_type,
+                           data=obj, created_at=now))
+        results.append({
+            "number": obj["number"], "e164": "+" + obj["number"], "city": obj.get("city"),
+            "region": obj.get("region"), "type": obj.get("type") or number_type,
+            "setup_price": _price(_f(obj.get("setup_rate"))),
+            "monthly_price": _price(_f(obj.get("monthly_rental_rate"))), "currency": "USD",
+            "voice_rate": _f(obj.get("voice_rate")), "sms_enabled": bool(obj.get("sms_enabled")),
+        })
+    db.commit()
     return {"numbers": results, "offset": offset, "has_more": bool((data.get("meta") or {}).get("next"))}
 
 
-def buy(db: Session, client: CurrentClient, number: str) -> PhoneNumber:
+def _by_idempotency_key(db: Session, client_id: str, key: str) -> PhoneNumber | None:
+    return db.scalars(select(PhoneNumber).where(PhoneNumber.client_id == client_id,
+                                                PhoneNumber.idempotency_key == key)).first()
+
+
+def buy(db: Session, client: CurrentClient, number: str, idempotency_key: str | None = None) -> PhoneNumber:
+    """Rent `number` for the client. With an idempotency_key, retrying the same request returns the
+    original result instead of buying again (check the returned row's status)."""
     s = get_settings()
-    number = number.lstrip("+").strip()
-    with _offers_lock:
-        offer = (_offers.get(client.client_id) or {}).get(number)
-    if not offer or time.time() - offer[0] > _SEARCH_TTL:
+    number = number.strip().lstrip("+")
+    if idempotency_key:
+        prior = _by_idempotency_key(db, client.client_id, idempotency_key)
+        if prior:
+            if prior.number != number:
+                raise HTTPException(409, "This Idempotency-Key was already used for a different number.")
+            return prior
+    offer = db.scalars(select(NumberOffer).where(NumberOffer.client_id == client.client_id,
+                                                 NumberOffer.number == number)).first()
+    if not offer or datetime.now(timezone.utc) - _aware(offer.created_at) > _SEARCH_TTL:
         raise HTTPException(400, "This number is not in your recent search results. Search again and pick a number.")
-    obj = offer[1]
-    number_type = obj["_number_type"]
+    obj = offer.data
+    number_type = offer.number_type
 
     app = accepted_application(db, client.client_id, number_type)
     if not app:
@@ -123,12 +140,16 @@ def buy(db: Session, client: CurrentClient, number: str) -> PhoneNumber:
     row = PhoneNumber(client_id=client.client_id, number=number, number_type=number_type,
                       country_iso=s.country_iso, city=obj.get("city"), region=obj.get("region"),
                       monthly_rental_rate=_f(obj.get("monthly_rental_rate")), setup_rate=_f(obj.get("setup_rate")),
-                      status="pending", application_id=app.id)
+                      status="pending", application_id=app.id, idempotency_key=idempotency_key)
     db.add(row)
     try:
-        db.commit()  # the partial unique index makes this our lock against double-buys
+        db.commit()  # the unique indexes make this our lock against double-buys
     except IntegrityError:
         db.rollback()
+        if idempotency_key:  # a concurrent retry with the same key won the race
+            prior = _by_idempotency_key(db, client.client_id, idempotency_key)
+            if prior and prior.number == number:
+                return prior
         raise HTTPException(409, "This number is already being purchased or owned.") from None
 
     try:
@@ -136,6 +157,7 @@ def buy(db: Session, client: CurrentClient, number: str) -> PhoneNumber:
                                       subaccount=app.plivo_subaccount_id) or {}
     except PlivoError as exc:
         row.status, row.failure_reason = "failed", exc.message
+        events.emit(db, "number.purchase_failed", client.client_id, {"number": number_out(row), "reason": exc.message})
         db.commit()
         raise HTTPException(exc.status_code, f"Purchase failed: {exc.message}") from exc
 
@@ -148,6 +170,8 @@ def buy(db: Session, client: CurrentClient, number: str) -> PhoneNumber:
         row.status = "active"
     elif "fail" in overall or "fail" in item_status:
         row.status, row.failure_reason = "failed", json.dumps(resp)[:1000]
+        events.emit(db, "number.purchase_failed", client.client_id,
+                    {"number": number_out(row), "reason": "Purchase failed at the carrier"})
         db.commit()
         raise HTTPException(502, "Purchase failed at the carrier. Please try another number.")
     else:
@@ -159,9 +183,10 @@ def buy(db: Session, client: CurrentClient, number: str) -> PhoneNumber:
         LedgerEntry(client_id=client.client_id, number=number, kind="monthly_rental",
                     plivo_cost=row.monthly_rental_rate, amount=_price(row.monthly_rental_rate)),
     ])
+    db.execute(delete(NumberOffer).where(NumberOffer.client_id == client.client_id, NumberOffer.number == number))
+    events.emit(db, "number.purchased" if row.status == "active" else "number.activation_pending",
+                client.client_id, {"number": number_out(row)})
     db.commit()
-    with _offers_lock:
-        (_offers.get(client.client_id) or {}).pop(number, None)
     log.info("client=%s bought %s under compliance %s", client.client_id, number, app.plivo_compliance_id)
 
     # Tag the number with the owning client in the Plivo console. Best-effort.
@@ -204,6 +229,7 @@ def release(db: Session, row: PhoneNumber) -> PhoneNumber:
             raise HTTPException(exc.status_code, f"Release failed: {exc.message}") from exc
         log.warning("%s was already gone from Plivo; marking released", row.number)
     row.status, row.released_at = "released", datetime.now(timezone.utc)
+    events.emit(db, "number.released", row.client_id, {"number": number_out(row)})
     db.commit()
     return row
 

@@ -5,7 +5,6 @@ customer's own KYC (end user + documents). Numbers rented for the customer are t
 """
 from __future__ import annotations
 
-import hashlib
 import logging
 import re
 import threading
@@ -20,6 +19,8 @@ from app.auth import CurrentClient, webhook_token
 from app.config import get_settings
 from app.models import ClientAccount, ComplianceApplication
 from app.plivo_client import PlivoError, UploadFile, get_plivo
+from app.serializers import app_out
+from app.services import events
 
 log = logging.getLogger(__name__)
 
@@ -112,15 +113,20 @@ def _norm(name: str) -> str:
 
 
 def validate_documents(requirements: dict, documents: list[dict], files: dict[str, UploadFile],
-                       business_name: str | None = None) -> tuple[list[dict], list[tuple[int, UploadFile]], list[dict]]:
+                       business_name: str | None = None,
+                       same_file_for_all: bool = False) -> tuple[list[dict], list[tuple[int, UploadFile]], list[dict]]:
     """Returns (plivo documents[], [(document index, file)], local metadata).
 
-    KYC_DOCUMENTS_MODE=all (default): every document type in Plivo's Requirements response is required.
-      This is what the Compliance API page specifies for India: Registration Certificate (COI/Udyam)
-      AND GST Certificate.
-    KYC_DOCUMENTS_MODE=one: exactly one of the listed types. This is the "any one of GST/COI/Udyam" wording
-      on Plivo's India console guide.
+    KYC_DOCUMENTS_MODE=all (default): every document type in Plivo's Requirements response must be sent.
+      Plivo support (Nov 2026): the API requires both document slots (Registration Certificate and GST
+      certificate). A business with only one of GST / COI / Udyam may upload the same file in both.
+    KYC_DOCUMENTS_MODE=one: exactly one document. Kept for completeness; Plivo's API rejects this today.
+
+    same_file_for_all: the caller sent one file; use it for every document that has no file of its own.
     """
+    if same_file_for_all and files:
+        only = next(iter(files.values()))
+        files = {d.get("document_type_id"): files.get(d.get("document_type_id")) or only for d in documents or []}
     types = {d["document_type_id"]: d for d in requirements.get("document_types", [])}
     documents = documents or []
     names = " and ".join(d["name"] for d in types.values())
@@ -131,7 +137,7 @@ def validate_documents(requirements: dict, documents: list[dict], files: dict[st
         missing = [types[t]["name"] for t in types if t not in {d.get("document_type_id") for d in documents}]
         if missing:
             raise HTTPException(400, f"All of these documents are required: {names}. Missing: {', '.join(missing)}")
-    out_docs, out_files, meta, seen, hashes = [], [], [], set(), {}
+    out_docs, out_files, meta, seen = [], [], [], set()
     for doc in documents:
         dt_id = doc.get("document_type_id")
         dt = types.get(dt_id)
@@ -183,11 +189,6 @@ def validate_documents(requirements: dict, documents: list[dict], files: dict[st
             ctype = _sniff(upload.content)
             if not ctype:
                 raise HTTPException(400, f"{dt['name']}: only PDF, JPEG or PNG files are accepted")
-            digest = hashlib.sha256(upload.content).hexdigest()
-            if digest in hashes:  # Plivo rejects the same file in two document slots
-                raise HTTPException(400, f"{dt['name']}: this is the same file as {hashes[digest]}. "
-                                         "Upload the correct document for each slot.")
-            hashes[digest] = dt["name"]
             upload = UploadFile(_safe_filename(upload.filename, ctype), upload.content, ctype)
             # Plivo pairs documents[i] (in `data`) with the multipart field documents[i].file.
             out_files.append((len(out_docs), upload))
@@ -231,7 +232,8 @@ def ensure_subaccount(db: Session, client: CurrentClient) -> str | None:
 
 
 def create_application(db: Session, client: CurrentClient, number_type: str, user_type: str,
-                       end_user: dict, documents: list[dict], files: dict[str, UploadFile]) -> ComplianceApplication:
+                       end_user: dict, documents: list[dict], files: dict[str, UploadFile],
+                       same_file_for_all: bool = False) -> ComplianceApplication:
     s = get_settings()
     _check_number_type(number_type)
     user_type = user_type or "business"
@@ -252,7 +254,7 @@ def create_application(db: Session, client: CurrentClient, number_type: str, use
     # Validate everything before creating anything on Plivo.
     reqs = get_requirements(number_type, user_type)
     eu = validate_end_user(end_user, user_type)
-    plivo_docs, plivo_files, meta = validate_documents(reqs, documents, files, eu["name"])
+    plivo_docs, plivo_files, meta = validate_documents(reqs, documents, files, eu["name"], same_file_for_all)
     subaccount = ensure_subaccount(db, client)
 
     app = ComplianceApplication(client_id=client.client_id, alias="pending", country_iso=s.country_iso,
@@ -273,19 +275,21 @@ def create_application(db: Session, client: CurrentClient, number_type: str, use
         raise HTTPException(exc.status_code, f"Plivo rejected the KYC submission: {exc.message}") from exc
     app.plivo_compliance_id = resp.get("compliance_id")
     app.status = "submitted"
+    db.flush()
+    events.emit(db, "kyc.submitted", client.client_id, {"application": app_out(app)})
     db.commit()
     log.info("client=%s submitted compliance %s (local #%s)", client.client_id, app.plivo_compliance_id, app.id)
     return app
 
 
 def resubmit_application(db: Session, app: ComplianceApplication, end_user: dict, documents: list[dict],
-                         files: dict[str, UploadFile]) -> ComplianceApplication:
+                         files: dict[str, UploadFile], same_file_for_all: bool = False) -> ComplianceApplication:
     sync_application(db, app, force=True)
     if app.status != "rejected":
         raise HTTPException(409, f"Only rejected applications can be corrected (current status: {app.status})")
     reqs = get_requirements(app.number_type, app.user_type)
     eu = validate_end_user({**app.end_user, **(end_user or {})}, app.user_type)
-    plivo_docs, plivo_files, meta = validate_documents(reqs, documents, files, eu["name"])
+    plivo_docs, plivo_files, meta = validate_documents(reqs, documents, files, eu["name"], same_file_for_all)
     payload = {"end_user": {k: v for k, v in eu.items() if k != "type"}, "documents": plivo_docs, **_callback(app.id)}
     try:
         get_plivo().update_compliance(app.plivo_compliance_id, payload, plivo_files)
@@ -293,6 +297,7 @@ def resubmit_application(db: Session, app: ComplianceApplication, end_user: dict
         raise HTTPException(exc.status_code, f"Plivo rejected the update: {exc.message}") from exc
     app.end_user, app.documents_meta = eu, meta
     app.status, app.rejection_reason = "submitted", None
+    events.emit(db, "kyc.submitted", app.client_id, {"application": app_out(app), "resubmission": True})
     db.commit()
     return app
 
@@ -317,11 +322,14 @@ def sync_application(db: Session, app: ComplianceApplication, force: bool = Fals
         log.warning("sync of compliance %s failed: %s", app.plivo_compliance_id, exc.message)
         return app
     new_status = data.get("status") or app.status
-    if new_status != app.status:
+    changed = new_status != app.status
+    if changed:
         log.info("compliance %s: %s -> %s", app.plivo_compliance_id, app.status, new_status)
     app.status = new_status
     app.rejection_reason = data.get("rejection_reason")
     app.last_synced_at = datetime.now(timezone.utc)
+    if changed and new_status in ("accepted", "rejected", "suspended", "expired"):
+        events.emit(db, f"kyc.{new_status}", app.client_id, {"application": app_out(app)})
     db.commit()
     return app
 

@@ -14,27 +14,11 @@ from app.models import ClientAccount, ComplianceApplication, LedgerEntry, PhoneN
 from app.plivo_client import UploadFile
 from app.services import compliance as kyc
 from app.services import numbers as nums
+from app.serializers import app_out, number_out
 
 api = APIRouter(prefix="/api", tags=["client"])
 webhooks = APIRouter(prefix="/webhooks", tags=["webhooks"])
 internal = APIRouter(prefix="/internal", tags=["internal"], dependencies=[Depends(require_admin)])
-
-
-# ------------------------------------------------------------------------------------- serializers
-def app_out(a: ComplianceApplication) -> dict:
-    return {"id": a.id, "number_type": a.number_type, "user_type": a.user_type, "status": a.status,
-            "rejection_reason": a.rejection_reason, "end_user": a.end_user, "documents": a.documents_meta,
-            "plivo_compliance_id": a.plivo_compliance_id, "created_at": a.created_at, "updated_at": a.updated_at,
-            "last_synced_at": a.last_synced_at}
-
-
-def number_out(n: PhoneNumber) -> dict:
-    s = get_settings()
-    return {"id": n.id, "number": n.number, "e164": "+" + n.number, "number_type": n.number_type,
-            "city": n.city, "region": n.region, "alias": n.alias, "status": n.status,
-            "monthly_price": round(n.monthly_rental_rate * s.price_markup, 4),
-            "setup_price": round(n.setup_rate * s.price_markup, 4),
-            "created_at": n.created_at, "released_at": n.released_at}
 
 
 # ------------------------------------------------------------------------------------- client API
@@ -82,7 +66,7 @@ async def create_application(request: Request, client: CurrentClient = Depends(g
     payload, files = await _read_kyc_form(request)
     a = await run_in_threadpool(kyc.create_application, db, client, payload.get("number_type", ""),
                                 payload.get("user_type", ""), payload.get("end_user") or {},
-                                payload.get("documents") or [], files)
+                                payload.get("documents") or [], files, bool(payload.get("same_file_for_all")))
     return app_out(a)
 
 
@@ -97,7 +81,7 @@ async def resubmit_application(app_id: int, request: Request, client: CurrentCli
     a = kyc.get_client_application(db, client, app_id)
     payload, files = await _read_kyc_form(request)
     a = await run_in_threadpool(kyc.resubmit_application, db, a, payload.get("end_user") or {},
-                                payload.get("documents") or [], files)
+                                payload.get("documents") or [], files, bool(payload.get("same_file_for_all")))
     return app_out(a)
 
 

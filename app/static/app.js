@@ -177,6 +177,8 @@ async function loadRequirements() {
     ? `Upload <b>one</b> of: ${esc(names.join(", "))}.`
     : `Upload <b>all</b> of: ${esc(names.join(" and "))}.`;
   $("#docTypeWrap").classList.toggle("hidden", !one);
+  $("#oneFileWrap").classList.toggle("hidden", one || types.length < 2);
+  $("#oneFileToggle").checked = false;
   const prevType = state.resubmitApp?.documents?.[0]?.document_type_id;
   $("#docTypeSelect").innerHTML = types.map((dt) =>
     `<option value="${esc(dt.document_type_id)}" ${dt.document_type_id === prevType ? "selected" : ""}>${esc(dt.name)}</option>`).join("");
@@ -219,11 +221,25 @@ function renderDocFields() {
     return `<h3 style="margin-top:14px">${esc(dt.name)}</h3><p class="muted" style="margin-top:0">${esc(dt.description || "")}</p>
       <div class="grid2">${fields}
         ${dt.proof_required ? `<label>Upload ${esc(dt.name)} <span class="req">*</span><span class="hint">PDF, JPG or PNG · max 5 MB · clear, complete, not cropped</span>
-          <input type="file" data-file="${esc(dt.document_type_id)}" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" required></label>` : ""}
+          <input type="file" data-file="${esc(dt.document_type_id)}" data-name="${esc(dt.name)}" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" required></label>` : ""}
       </div>`;
   }).join("");
   syncBusinessName();
+  applyOneFileMode();
 }
+
+// Plivo needs every document slot filled, but accepts the same file in each (Plivo support, Nov 2026).
+const oneFileMode = () => !$("#oneFileWrap").classList.contains("hidden") && $("#oneFileToggle").checked;
+function applyOneFileMode() {
+  document.querySelectorAll("[data-file]").forEach((input, i) => {
+    const label = input.closest("label");
+    const extra = oneFileMode() && i > 0;
+    label.classList.toggle("hidden", extra);
+    input.required = !extra;
+    if (i === 0) label.firstChild.textContent = oneFileMode() ? "Upload your document (GST, COI or Udyam) " : `Upload ${input.dataset.name} `;
+  });
+}
+$("#oneFileToggle").addEventListener("change", applyOneFileMode);
 
 $("#kycForm").addEventListener("submit", async (ev) => {
   ev.preventDefault();
@@ -240,13 +256,15 @@ $("#kycForm").addEventListener("submit", async (ev) => {
     });
     return { document_type_id: dt.document_type_id, data_fields };
   });
+  const sameFile = oneFileMode();
   for (const input of document.querySelectorAll("[data-file]")) {
     const file = input.files[0];
-    if (!file) continue;
+    if (!file || (sameFile && input.closest("label").classList.contains("hidden"))) continue;
     if (file.size > 5 * 1024 * 1024) return showError(errEl, `${file.name} is larger than 5 MB`);
     fd.append(`file_${input.dataset.file}`, file);
   }
-  fd.append("payload", JSON.stringify({ number_type: $("#kycNumberType").value, user_type: USER_TYPE, end_user: endUser, documents }));
+  fd.append("payload", JSON.stringify({ number_type: $("#kycNumberType").value, user_type: USER_TYPE, end_user: endUser,
+                                       documents, same_file_for_all: sameFile }));
   const btn = $("#kycSubmit"); btn.disabled = true;
   try {
     const url = state.resubmitApp ? `/api/compliance/applications/${state.resubmitApp.id}/resubmit` : "/api/compliance/applications";

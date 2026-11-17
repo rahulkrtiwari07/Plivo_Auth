@@ -8,8 +8,10 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
 from app.db import SessionLocal, init_db
+from app.integration import v1
 from app.routers import api, internal, webhooks
 from app.services.compliance import sync_pending
+from app.services.events import deliver_due
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("app")
@@ -30,6 +32,19 @@ async def _poll_compliance(interval: int) -> None:
             log.exception("compliance poller failed")
 
 
+async def _deliver_webhooks(interval: int) -> None:
+    """Send queued webhook events (with retries) to WEBHOOK_URL."""
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            def run():
+                with SessionLocal() as db:
+                    return deliver_due(db)
+            await asyncio.to_thread(run)
+        except Exception:
+            log.exception("webhook delivery loop failed")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     s = get_settings()
@@ -38,13 +53,23 @@ async def lifespan(_: FastAPI):
         log.warning("PLIVO_MOCK=true: no real Plivo requests will be made")
     if s.dev_mode:
         log.warning("DEV_MODE=true: /api/dev/token is enabled. Disable in production.")
-    task = asyncio.create_task(_poll_compliance(s.compliance_poll_seconds)) if s.compliance_poll_seconds > 0 else None
+    if s.webhook_url and not s.webhook_secret:
+        raise RuntimeError("WEBHOOK_URL is set but WEBHOOK_SECRET is empty; webhooks must be signed")
+    if not s.integration_api_key:
+        log.warning("INTEGRATION_API_KEY is empty: the /v1 integration API is disabled")
+    tasks = []
+    if s.compliance_poll_seconds > 0:
+        tasks.append(asyncio.create_task(_poll_compliance(s.compliance_poll_seconds)))
+    if s.webhook_url:
+        tasks.append(asyncio.create_task(_deliver_webhooks(s.webhook_poll_seconds)))
     yield
-    if task:
+    for task in tasks:
         task.cancel()
 
 
-app = FastAPI(title="Plivo Numbers for Clients", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Plivo Numbers for Clients", version="1.1.0", lifespan=lifespan,
+              description="Integration API for your backend: see the **Integration v1** section and docs/INTEGRATION.md.")
+app.include_router(v1)
 app.include_router(api)
 app.include_router(webhooks)
 app.include_router(internal)
