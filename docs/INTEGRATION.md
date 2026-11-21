@@ -209,6 +209,11 @@ X-Webhook-Signature: sha256=8c1e...
 | `number.activation_pending` | `number` | Show "activating" |
 | `number.purchase_failed` | `number`, `reason` | Refund |
 | `number.released` | `number` | Stop billing |
+| `billing.charged` | `charge` | A rental period was deducted from the wallet |
+| `billing.payment_due` | `charge`, `balance` | Renewal couldn't be paid: ask the seller to recharge |
+| `number.suspended_nonpayment` | `charge` | Unpaid past the grace period: number is off the dialer |
+| `number.released_nonpayment` | `charge` | Released for non-payment (only if `BILLING_RELEASE_AFTER_DAYS` > 0) |
+| `billing.needs_review` | `charge` | Bigship refused a deduction or gave no clear answer: check by hand |
 | `webhook.test` | `message` | From `POST /v1/webhook-events/test` |
 
 **Your endpoint must:**
@@ -248,6 +253,35 @@ If you'd rather not use webhooks, poll `GET /v1/customers/{id}` while a KYC is `
 
 ## 7. Billing notes
 
+### Wallet billing (`WALLET_BILLING_ENABLED=true`)
+Number rental is deducted from the seller's **Bigship wallet** by this service, using the same Bigship wallet API
+as AICall (`/api/shared/get-wallet-balance`, `/api/shared/ai-wallet-deduction`). Your frontend and Laravel do
+nothing; the customer id must be the numeric Bigship customer id.
+
+- **Price:** `NUMBER_MONTHLY_PRICE_INR` + `NUMBER_GST_PERCENT` GST per number per `BILLING_PERIOD_DAYS`
+  (default ₹300 + 18% = **₹354 every 30 days**). Shown as `price_inr` in search results, numbers and `/v1/config`.
+- **Buying:** the wallet must cover one period, otherwise `402` (or `503` if the wallet can't be read) and nothing
+  is bought. After Plivo rents the number, the first period is deducted immediately.
+- **Renewal:** each period is deducted automatically when the previous one ends (`paid_until` on the number).
+- **Not enough balance:** the charge becomes `insufficient` and is retried daily (webhook `billing.payment_due`).
+  After `BILLING_GRACE_DAYS` the number gets `billing_status: "overdue"` and is removed from caller IDs
+  (`number.suspended_nonpayment`); it returns as soon as the charge goes through. With
+  `BILLING_RELEASE_AFTER_DAYS` > 0 it is released on Plivo after that many unpaid days (irreversible).
+- **Release stops billing at once:** no renewal is queued for a released number, and a renewal still waiting
+  for money is `cancelled` (never deducted, even if the seller tops up later). Days already paid are not refunded.
+- **No double charges:** each number+period is one row. Bigship's deduction API has no idempotency key, so a
+  deduction that timed out or got a 5xx is marked `unknown` and **not retried**. Check the seller's wallet, then
+  `POST /internal/billing/charges/{id}/resolve` with `{"status": "confirmed" | "failed" | "retry"}`.
+
+```
+GET  /v1/customers/{id}/charges[?number_id=]          the seller's charges (status, amount, period)
+GET  /internal/billing/charges?status=unknown          (X-Admin-Key) charges that need a human
+POST /internal/billing/charges/{id}/resolve            (X-Admin-Key)
+POST /internal/billing/run                             (X-Admin-Key) run a billing pass now
+```
+
+### Plivo cost
+
 - Prices returned are Plivo's cost × `PRICE_MARKUP`, in USD. Today: $0 setup, $2.50/month per Bangalore/Mumbai number.
 - Plivo bills monthly rental from the rental date until the number is released. Bill your customers on the same
   basis using `number.purchased` and `number.released`.
@@ -264,3 +298,7 @@ If you'd rather not use webhooks, poll `GET /v1/customers/{id}` while a KYC is `
 | `NUMBER_CITIES` | Cities offered (Plivo spelling) |
 | `MAX_NUMBERS_PER_CLIENT` | Per-customer limit |
 | `PRICE_MARKUP` | Multiplier on Plivo prices |
+| `WALLET_BILLING_ENABLED` | Deduct number rental from the seller's Bigship wallet |
+| `NUMBER_MONTHLY_PRICE_INR` / `NUMBER_GST_PERCENT` / `BILLING_PERIOD_DAYS` | Rental price (₹, before GST), GST %, period |
+| `BILLING_GRACE_DAYS` / `BILLING_RELEASE_AFTER_DAYS` | Days unpaid before off-dialer / before release (0 = never) |
+| `BIGSHIP_WALLET_BASE_URL` / `_EMAIL` / `_PASSWORD` | Bigship wallet login (same as AICall) |

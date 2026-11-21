@@ -36,5 +36,11 @@ def _upgrade_existing_tables() -> None:
     with engine.begin() as conn:
         if "idempotency_key" not in cols:
             conn.execute(text("ALTER TABLE phone_numbers ADD COLUMN idempotency_key VARCHAR(128)"))
+        if "paid_until" not in cols:
+            conn.execute(text("ALTER TABLE phone_numbers ADD COLUMN paid_until TIMESTAMP WITH TIME ZONE"
+                              if engine.dialect.name == "postgresql" else
+                              "ALTER TABLE phone_numbers ADD COLUMN paid_until TIMESTAMP"))
+        if "billing_status" not in cols:
+            conn.execute(text("ALTER TABLE phone_numbers ADD COLUMN billing_status VARCHAR(16) NOT NULL DEFAULT 'ok'"))
         conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_number_idempotency "
                           "ON phone_numbers (client_id, idempotency_key)"))

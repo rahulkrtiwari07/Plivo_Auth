@@ -51,6 +51,7 @@ class PlivoAPI(Protocol):
                    subaccount: str | None = None) -> dict: ...
     def update_number(self, number: str, alias: str | None = None, app_id: str | None = None) -> dict: ...
     def delete_number(self, number: str) -> None: ...
+    def get_number(self, number: str) -> dict: ...
 
 
 # --------------------------------------------------------------------------------------------
@@ -142,6 +143,10 @@ class PlivoClient:
 
     def delete_number(self, number):
         self._request("DELETE", self._url("Number", number))
+
+    def get_number(self, number):
+        """A number rented on the account (or a subaccount); PlivoError 'not found' once it's gone."""
+        return self._request("GET", self._url("Number", number))
 
 
 # --------------------------------------------------------------------------------------------
@@ -292,6 +297,11 @@ class MockPlivoClient:
     def delete_number(self, number):
         if self._rented.pop(number, None) is None:
             raise PlivoError("Number not found on account", 404)
+
+    def get_number(self, number):
+        if number not in self._rented:
+            raise PlivoError("Number not found on account", 404)
+        return {"number": number, **self._rented[number]}
 
 
 _client: PlivoAPI | None = None

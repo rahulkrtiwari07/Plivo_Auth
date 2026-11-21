@@ -4,3 +4,7 @@ __pycache__/
 .env
 *.db
 .pytest_cache/
+
+# local copies of secrets
+.env.bak
+.env.*.bak

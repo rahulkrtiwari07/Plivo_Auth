@@ -10,10 +10,11 @@ from sqlalchemy.orm import Session
 from app.auth import CurrentClient, get_current_client, mint_client_token, require_admin, webhook_token
 from app.config import Settings, get_settings
 from app.db import get_db
-from app.models import ClientAccount, ComplianceApplication, LedgerEntry, PhoneNumber
+from app.models import ClientAccount, ComplianceApplication, LedgerEntry, PhoneNumber, WalletCharge
 from app.plivo_client import UploadFile
 from app.services import compliance as kyc
 from app.services import numbers as nums
+from app.services import wallet
 from app.serializers import app_out, number_out
 
 api = APIRouter(prefix="/api", tags=["client"])
@@ -162,8 +163,8 @@ def caller_ids(client_id: str, db: Session = Depends(get_db)):
 @internal.get("/caller-ids/validate")
 def validate_caller_id(client_id: str, number: str, db: Session = Depends(get_db)):
     """Call before dialing: does `client_id` own `number`, and is its KYC currently accepted?"""
-    wanted = number.strip().lstrip("+")
-    return {"allowed": any(n.number == wanted for n in nums.callable_numbers(db, client_id))}
+    allowed, reason = nums.check_caller_id(db, client_id, number)
+    return {"allowed": allowed, "reason": reason}
 
 
 @internal.get("/applications")
@@ -185,6 +186,12 @@ def all_numbers(client_id: str | None = None, db: Session = Depends(get_db)):
     return [{**number_out(n), "client_id": n.client_id, "failure_reason": n.failure_reason} for n in db.scalars(q).all()]
 
 
+@internal.post("/numbers/sync")
+def sync_numbers(db: Session = Depends(get_db)):
+    """Mark numbers that no longer exist on Plivo (deleted in the console) as released."""
+    return {"released": nums.sync_with_plivo(db)}
+
+
 @internal.post("/compliance/sync")
 def sync_all(db: Session = Depends(get_db)):
     return {"synced": kyc.sync_pending(db)}
@@ -193,6 +200,38 @@ def sync_all(db: Session = Depends(get_db)):
 @internal.post("/billing/accrue")
 def accrue(db: Session = Depends(get_db)):
     return {"entries_created": nums.accrue_monthly_rentals(db)}
+
+
+@internal.get("/billing/charges")
+def wallet_charges(status: str | None = None, client_id: str | None = None, db: Session = Depends(get_db)):
+    """Wallet charges. `?status=unknown` / `failed` lists the ones that need a human."""
+    q = select(WalletCharge).order_by(WalletCharge.id.desc())
+    if status:
+        q = q.where(WalletCharge.status == status)
+    if client_id:
+        q = q.where(WalletCharge.client_id == client_id)
+    return [{**wallet.charge_out(c), "client_id": c.client_id} for c in db.scalars(q).all()]
+
+
+class ResolveIn(BaseModel):
+    status: str = Field(description="confirmed (it WAS deducted) | failed (it wasn't; give up) | retry (send again)")
+
+
+@internal.post("/billing/charges/{charge_id}/resolve")
+def resolve_charge(charge_id: int, body: ResolveIn, db: Session = Depends(get_db)):
+    """After checking the seller's wallet statement, settle an `unknown` or `failed` charge."""
+    ch = db.get(WalletCharge, charge_id)
+    if not ch:
+        raise HTTPException(404, "Charge not found")
+    return wallet.charge_out(wallet.resolve(db, ch, body.status))
+
+
+@internal.post("/billing/run")
+def run_wallet_billing(db: Session = Depends(get_db)):
+    """Run one wallet billing pass now (the background loop does this every WALLET_POLL_SECONDS)."""
+    if not get_settings().wallet_billing_enabled:
+        raise HTTPException(409, "WALLET_BILLING_ENABLED is false")
+    return wallet.run_billing(db)
 
 
 @internal.get("/ledger")

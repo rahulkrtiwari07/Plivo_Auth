@@ -10,4 +10,7 @@ os.environ.update(
     PLIVO_USE_SUBACCOUNTS="true", KYC_DOCUMENTS_MODE="all", NUMBER_CITIES="Bangalore,Mumbai",
     INTEGRATION_API_KEY="int-key", WEBHOOK_URL="https://bigship.example.com/hooks/plivo-numbers",
     WEBHOOK_SECRET="whsec-test", WEBHOOK_POLL_SECONDS="3600",  # tests deliver explicitly
+    # Never touch the real Bigship wallet from tests, whatever the server's .env says.
+    WALLET_BILLING_ENABLED="false", BIGSHIP_WALLET_BASE_URL="https://wallet.invalid",
+    BIGSHIP_WALLET_EMAIL="", BIGSHIP_WALLET_PASSWORD="", WALLET_POLL_SECONDS="3600",
 )

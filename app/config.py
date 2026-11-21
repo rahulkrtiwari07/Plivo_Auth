@@ -30,6 +30,8 @@ class Settings(BaseSettings):
 
     max_numbers_per_client: int = 10
     compliance_poll_seconds: int = 300
+    # Re-check active numbers against Plivo (catches numbers deleted in the Plivo console). 0 = off.
+    number_sync_seconds: int = 900
     price_markup: float = 1.0
     # Cities offered in the "Buy numbers" dropdown, spelled exactly as Plivo spells them.
     # As of Nov 2026 Plivo only has India landline stock in these two.
@@ -43,6 +45,33 @@ class Settings(BaseSettings):
     # Shared secret used to sign webhook bodies (HMAC-SHA256). Required when webhook_url is set.
     webhook_secret: str = ""
     webhook_poll_seconds: int = 5
+
+    # Browser origins allowed to call this API (CORS), comma-separated, e.g.
+    # "https://app.bigship.direct,http://localhost:4200". Empty = CORS off (server-to-server only).
+    allowed_origins: str = ""
+
+    # ---- Wallet billing: deduct number rental from the seller's Bigship wallet ----
+    # Off = no wallet calls at all (purchases are not checked or charged).
+    wallet_billing_enabled: bool = False
+    # Price per number per billing period, in rupees, before GST. GST is added on top.
+    number_monthly_price_inr: float = 300.0
+    number_gst_percent: float = 18.0
+    billing_period_days: int = 30
+    # Days a renewal may stay unpaid (retried daily) before the number is taken off the dialer.
+    billing_grace_days: int = 3
+    # Days unpaid after which the number is RELEASED on Plivo (irreversible). 0 = never auto-release.
+    billing_release_after_days: int = 0
+    # Seconds between runs of the wallet charge loop.
+    wallet_poll_seconds: int = 30
+    # Same Bigship wallet API and login as AICall (BIGSHIP_WALLET_* in ~/AICall/bigagent/.env).
+    bigship_wallet_base_url: str = "https://appapi.bigship.direct"
+    bigship_wallet_email: str = ""
+    bigship_wallet_password: str = ""
+    wallet_http_timeout_seconds: float = 10.0
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [o.strip().rstrip("/") for o in self.allowed_origins.split(",") if o.strip()]
 
     @property
     def cities(self) -> list[str]:

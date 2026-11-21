@@ -22,11 +22,11 @@ from sqlalchemy.orm import Session
 from app.auth import CurrentClient
 from app.config import Settings, get_settings
 from app.db import get_db
-from app.models import ClientAccount, ComplianceApplication, PhoneNumber, WebhookEvent
+from app.models import ClientAccount, ComplianceApplication, PhoneNumber, WalletCharge, WebhookEvent
 from app.routers import _read_kyc_form
 from app.serializers import app_out, number_out
 from app.services import compliance as kyc
-from app.services import events
+from app.services import events, wallet
 from app.services import numbers as nums
 
 
@@ -62,7 +62,8 @@ def config(s: Settings = Depends(get_settings)):
     """What your UI needs to render the KYC and number-search screens."""
     return {"country_iso": s.country_iso, "number_types": s.number_types, "cities": s.cities,
             "kyc_documents_mode": s.kyc_documents_mode, "max_numbers_per_customer": s.max_numbers_per_client,
-            "currency": "USD", "mock": s.plivo_mock}
+            "currency": "USD", "mock": s.plivo_mock,
+            "wallet_billing": wallet.price_out() if s.wallet_billing_enabled else None}
 
 
 @v1.get("/kyc/requirements", summary="KYC documents and fields Plivo requires")
@@ -239,6 +240,18 @@ def release_number(number_id: int, customer_id: str = CustomerId, db: Session = 
     return number_out(nums.release(db, row))
 
 
+# ------------------------------------------------------------------------------------- wallet billing
+@v1.get("/customers/{customer_id}/charges", summary="Number rental charges deducted from the wallet")
+def list_charges(customer_id: str = CustomerId, number_id: int | None = None, db: Session = Depends(get_db)):
+    """One row per number per billing period (₹ price + GST). `status`: `confirmed` (deducted),
+    `pending` (being sent), `insufficient` (balance too low; retried daily), `cancelled` (number released before it was paid: never charged), `failed` / `unknown`
+    (Bigship refused it / no clear answer: under review)."""
+    q = select(WalletCharge).where(WalletCharge.client_id == customer_id)
+    if number_id is not None:
+        q = q.where(WalletCharge.number_id == number_id)
+    return [wallet.charge_out(c) for c in db.scalars(q.order_by(WalletCharge.id.desc())).all()]
+
+
 # ------------------------------------------------------------------------------------- dialer
 @v1.get("/customers/{customer_id}/caller-ids", summary="Numbers the dialer may call from")
 def caller_ids(customer_id: str = CustomerId, db: Session = Depends(get_db)):
@@ -252,8 +265,8 @@ def caller_ids(customer_id: str = CustomerId, db: Session = Depends(get_db)):
 @v1.get("/caller-ids/validate", summary="May this customer call from this number right now?")
 def validate_caller_id(customer_id: str = Query(min_length=1, max_length=64), number: str = Query(min_length=6),
                        db: Session = Depends(get_db)):
-    wanted = number.strip().lstrip("+")
-    return {"allowed": any(n.number == wanted for n in nums.callable_numbers(db, customer_id))}
+    allowed, reason = nums.check_caller_id(db, customer_id, number)
+    return {"allowed": allowed, "reason": reason}
 
 
 # ------------------------------------------------------------------------------------- webhooks

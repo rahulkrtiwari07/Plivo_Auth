@@ -1,6 +1,7 @@
 """JSON shapes shared by the HTTP APIs and webhook payloads."""
 from app.config import get_settings
 from app.models import ComplianceApplication, PhoneNumber
+from app.services import wallet
 
 
 def app_out(a: ComplianceApplication) -> dict:
@@ -16,4 +17,6 @@ def number_out(n: PhoneNumber) -> dict:
             "city": n.city, "region": n.region, "alias": n.alias, "status": n.status,
             "monthly_price": round(n.monthly_rental_rate * s.price_markup, 4),
             "setup_price": round(n.setup_rate * s.price_markup, 4), "currency": "USD",
-            "created_at": n.created_at, "released_at": n.released_at}
+            "created_at": n.created_at, "released_at": n.released_at,
+            "paid_until": n.paid_until, "billing_status": n.billing_status or "ok",
+            **({"price_inr": wallet.price_out()} if s.wallet_billing_enabled else {})}

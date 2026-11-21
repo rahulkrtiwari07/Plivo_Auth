@@ -76,8 +76,41 @@ class PhoneNumber(Base):
     idempotency_key: Mapped[str | None] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Wallet billing: rental is paid up to this moment (None = never charged / billing off).
+    paid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # ok | overdue (unpaid past the grace period: not given to the dialer)
+    billing_status: Mapped[str] = mapped_column(String(16), default="ok", server_default="ok")
 
     application: Mapped[ComplianceApplication] = relationship(back_populates="numbers")
+
+
+class WalletCharge(Base):
+    """One rental period of one number, deducted from the seller's Bigship wallet.
+
+    status: pending (to send) | insufficient (balance too low, retried daily) | confirmed (deducted)
+            | cancelled (number released before it was paid: never charged)
+            | failed (Bigship refused it: needs review) | unknown (no clear answer: may or may not have
+            been deducted; NEVER retried automatically, since Bigship's API can't de-duplicate)
+    """
+
+    __tablename__ = "wallet_charges"
+    __table_args__ = (UniqueConstraint("number_id", "period_start", name="uq_charge_number_period"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[str] = mapped_column(String(64), index=True)
+    number_id: Mapped[int] = mapped_column(ForeignKey("phone_numbers.id"), index=True)
+    number: Mapped[str] = mapped_column(String(32))
+    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    base_paise: Mapped[int] = mapped_column(Integer)
+    gst_paise: Mapped[int] = mapped_column(Integer)
+    amount_paise: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class NumberOffer(Base):

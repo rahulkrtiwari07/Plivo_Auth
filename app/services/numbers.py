@@ -16,7 +16,7 @@ from app.config import get_settings
 from app.models import ComplianceApplication, LedgerEntry, NumberOffer, PhoneNumber
 from app.plivo_client import PlivoError, get_plivo
 from app.serializers import number_out
-from app.services import events
+from app.services import events, wallet
 from app.services.compliance import accepted_application
 
 log = logging.getLogger(__name__)
@@ -101,6 +101,7 @@ def search(db: Session, client: CurrentClient, number_type: str, pattern: str | 
             "setup_price": _price(_f(obj.get("setup_rate"))),
             "monthly_price": _price(_f(obj.get("monthly_rental_rate"))), "currency": "USD",
             "voice_rate": _f(obj.get("voice_rate")), "sms_enabled": bool(obj.get("sms_enabled")),
+            **({"price_inr": wallet.price_out()} if s.wallet_billing_enabled else {}),
         })
     db.commit()
     return {"numbers": results, "offset": offset, "has_more": bool((data.get("meta") or {}).get("next"))}
@@ -136,6 +137,8 @@ def buy(db: Session, client: CurrentClient, number: str, idempotency_key: str | 
         PhoneNumber.client_id == client.client_id, PhoneNumber.status.in_(LIVE_STATUSES)))
     if held >= s.max_numbers_per_client:
         raise HTTPException(409, f"You can hold at most {s.max_numbers_per_client} numbers.")
+    if s.wallet_billing_enabled:
+        wallet.require_balance_for_purchase(client.client_id)  # 402 / 503: nothing is bought
 
     row = PhoneNumber(client_id=client.client_id, number=number, number_type=number_type,
                       country_iso=s.country_iso, city=obj.get("city"), region=obj.get("region"),
@@ -189,6 +192,16 @@ def buy(db: Session, client: CurrentClient, number: str, idempotency_key: str | 
     db.commit()
     log.info("client=%s bought %s under compliance %s", client.client_id, number, app.plivo_compliance_id)
 
+    if s.wallet_billing_enabled:
+        # First period. The charge row is saved before deducting, so the loop retries it if this fails.
+        try:
+            ch = wallet.queue_charge(db, row, datetime.now(timezone.utc))
+            if ch:
+                wallet.send_charge(db, ch)
+        except Exception:
+            db.rollback()
+            log.exception("wallet charge for %s will be retried by the billing loop", number)
+
     # Tag the number with the owning client in the Plivo console. Best-effort.
     try:
         get_plivo().update_number(number, alias=f"client:{client.client_id}"[:99])
@@ -209,7 +222,7 @@ def callable_numbers(db: Session, client_id: str) -> list[PhoneNumber]:
     compliance application is suspended (UCC complaints) or expired, so don't hand those to the dialer."""
     q = (select(PhoneNumber).join(ComplianceApplication, PhoneNumber.application_id == ComplianceApplication.id)
          .where(PhoneNumber.client_id == client_id, PhoneNumber.status == "active",
-                ComplianceApplication.status == "accepted")
+                PhoneNumber.billing_status == "ok", ComplianceApplication.status == "accepted")
          .order_by(PhoneNumber.created_at.desc()))
     return list(db.scalars(q).all())
 
@@ -228,10 +241,62 @@ def release(db: Session, row: PhoneNumber) -> PhoneNumber:
         if exc.status_code != 404 and "not found" not in exc.message.lower():
             raise HTTPException(exc.status_code, f"Release failed: {exc.message}") from exc
         log.warning("%s was already gone from Plivo; marking released", row.number)
+    return _mark_released(db, row)
+
+
+def _mark_released(db: Session, row: PhoneNumber, reason: str | None = None) -> PhoneNumber:
     row.status, row.released_at = "released", datetime.now(timezone.utc)
+    if reason:
+        row.failure_reason = reason
+    wallet.cancel_open_charges(db, row)  # no renewal is ever deducted after a release
     events.emit(db, "number.released", row.client_id, {"number": number_out(row)})
     db.commit()
     return row
+
+
+def _gone_from_plivo(exc: PlivoError) -> bool:
+    return exc.status_code == 404 or "not found" in exc.message.lower()
+
+
+def check_caller_id(db: Session, client_id: str, number: str) -> tuple[bool, str | None]:
+    """May `client_id` call from `number` right now? Our records first, then Plivo itself, so a
+    number deleted in the Plivo console is refused (and released) at once instead of at the next
+    sync. If Plivo can't be asked, our records decide: a Plivo hiccup must not stop every campaign."""
+    wanted = number.strip().lstrip("+")
+    row = next((n for n in callable_numbers(db, client_id) if n.number == wanted), None)
+    if row is None:
+        return False, "not_owned_or_not_active"
+    try:
+        get_plivo().get_number(row.number)
+    except PlivoError as exc:
+        if _gone_from_plivo(exc):
+            log.warning("%s (client %s) is gone from Plivo; refusing it and marking released", row.number, client_id)
+            _mark_released(db, row, reason="Removed directly in the Plivo console (not found on Plivo)")
+            return False, "released_on_plivo"
+        log.warning("caller-ID check: could not reach Plivo for %s (%s); allowing from our records",
+                    row.number, exc.message)
+    return True, None
+
+
+def sync_with_plivo(db: Session, max_per_run: int = 100) -> int:
+    """Mark released every 'active' number that no longer exists on Plivo — deleted directly
+    in the Plivo console, or released by Plivo itself — so it stops being listed, offered to
+    the dialer as a caller ID, and billed. Numbers still activating are left alone (Plivo may
+    not list them yet), and any error other than 'not found' leaves the number as it is."""
+    released = 0
+    rows = db.scalars(select(PhoneNumber).where(PhoneNumber.status == "active")
+                      .order_by(PhoneNumber.id).limit(max_per_run)).all()
+    for row in rows:
+        try:
+            get_plivo().get_number(row.number)
+        except PlivoError as exc:
+            if _gone_from_plivo(exc):
+                log.warning("%s (client %s) no longer exists on Plivo; marking released", row.number, row.client_id)
+                _mark_released(db, row, reason="Removed directly in the Plivo console (not found on Plivo)")
+                released += 1
+            else:
+                log.warning("number sync: could not check %s: %s", row.number, exc.message)
+    return released
 
 
 def accrue_monthly_rentals(db: Session) -> int:
